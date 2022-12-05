@@ -1,8 +1,12 @@
+#import scipy.io
 import math
 from math import pi, sqrt, exp
+from mpmath import sech
 import numpy as np
+from numpy.fft import fft, ifft
 import matplotlib.pyplot as plt
 import matplotlib as mlp
+from matplotlib.animation import FuncAnimation
 import random
 from optparse import OptionParser
 import csv
@@ -10,87 +14,96 @@ import os
 from scipy.stats import norm
 
 
-def DFT(a):
-    
-    a_sum = 0
-    for i in range(len(a)):
-        a_sum += a[i] * np.exp(1j * 2*pi * i * np.arange(len(a))/len(a))
-    a_tilde = a_sum/len(a)
-    return a_tilde
-
-def inv_DFT(a_tilde):
-    a = 0
-    for i in range(len(a_tilde)):
-        a += a_tilde[i] * np.exp(-1j * 2*pi * i * np.arange(len(a_tilde))/len(a_tilde))
-    return a
+beta_0 = 2 * pi * 1.467 / (1.55e-9) # 1/km
+beta_1 = 0 #ps/km
+beta_2 = -20 #ps^2/km
+beta_3 = 0.1 #ps^3/km
+kappa = 1.467 #W^-1 km^-1  Kerr nonlinearity coefficient
+omega_0 = 193.1e12/(2*pi) #1550 nm center frequency
 
 def beta(omega):
-    beta_0 = 1
-    beta_1 = 0
-    beta_2 = 0
-    beta_3 = 0
-    omega_0 = 193.1e12/(2*pi)
     dw = omega - omega_0
     return beta_0 + dw*beta_1 + dw**2 * beta_2/2 + dw**3 * beta_3/6
 
-dt = 1e-6 #time step
-dz = 1e-3 #space step
 
-N = 10 #Numberof space steps
-M = 10 #number of time steps
+c_fiber = 2.99792e-7/1.467 #km/ps
 
-beta_0 = 1
-kappa = 0.1 #Kerr nonlinearity coefficient
-beta_2 = 0.1 #second-order dispersion
+z_max = 0.000001 #km
+t_max = z_max/c_fiber #ps
+
+M = 1000 #number of time steps
+N = 1000 #Number of space steps
+
+dt =  t_max/M  #1e-6 #ps  time step
+print('dt: ', dt)
+dz = z_max/N #km  space step
+
+
+beta_0 = 2 * pi * 1.467 / (1.55e-9)
+kappa = 1.5 #W^-1 km^-1  Kerr nonlinearity coefficient
+beta_2 = -20  #ps^2/km   second-order dispersion
 omega_0 = 193.1e12/(2*pi) #1550 nm center frequency
-A = np.zeros((M, N))
+FWHM = 0.2 #ps  FWHM 
+
+
+A = np.zeros((M, N), dtype = 'complex_')
 #A[:, 0] = np.ones(10)
 for m in range(M): #initial gaussian pulse shape
-    A[m, 0] = norm.pdf(m, 5)
-print(A[:, 0])
+    A[m, 0] = 1e6 * norm.pdf(dt*m, 0.5, FWHM/2.355)
+
+plt.plot(A[:, 0])
+plt.show()
 
 
-#Compute Classical pulse envelope using split-step method
+#print(A[:, 0])
+
+
+#Compute classical pulse envelope using split-step method
 
 for n in range(N-1):
-    if n%2 == 0:
-        A[:, n+1] = A[:, n] * np.exp(1j * kappa * np.absolute(A[:, n]) * dz)
-    else:
-        A_tilde = np.zeros(M)
-        for omega in range(M):
-            A_tilde[omega] = DFT(A[:, n])[omega] * np.exp(1j * beta_2 * (omega - omega_0)**2 * dz)
+        A_NL = A[:, n] * np.exp(1j * kappa * np.absolute(A[:, n])**2 * dz/2) #Nonlinear step
+        #print(np.exp(1j * kappa * np.absolute(A[:, n])**2 * dz))
 
-        A[:, n+1] = inv_DFT(A_tilde)
+        A_tilde = fft(A_NL)
+        A_D = np.zeros(M, dtype = 'complex_')
+        for f in range(M): #Dispersion step in frequency space
+            A_D[f] = A_tilde[f] * np.exp(1j * beta_2 * (2*pi*f/dt - omega_0)**2 * dz/2)
+
+        A[:, n+1] = ifft(A_D)
      
 
-
-mu = np.zeros((M, M, N))
-mu[:, :, 0] = np.identity(M)
+"""
+mu = np.zeros((M, M, N), dtype = 'complex_')
+mu[:, :, 0] = np.identity(M ,dtype = 'complex_')
 #print(mu[:, :, 0])
 
-nu = np.zeros((M, M, N))
-nu[:, :, 0] = np.identity(M)
+nu = np.zeros((M, M, N), dtype = 'complex_')
+nu[:, :, 0] = np.identity(M, dtype = 'complex_')
 
 
 for n in range(N-1):
+    if n%50 == 0:
+            print(n, " / ", N)
     for k in range(M):
         mu[k, :, n+1] = ((1 + 2j*kappa*dz*(abs(A[k, n])**2) + 1j*beta_2*dz/(dt**2)) * mu[k, :, n]
                             + 1j*kappa*dz*(A[k, n])**2 * np.conjugate(nu[k, :, n])
-                            + 1j * dz * inv_DFT((beta(2*pi*k/(M*dt) + omega_0) - beta_0) * DFT(mu[k, :, n]))) #- 1j * beta_2 * dz/(2*dt**2) * (mu[k-1, :, n] + mu[k+1, :, n]))
+                            + 1j * dz * ifft((beta(2*pi*k/(M*dt) + omega_0) - beta_0) * fft(mu[k, :, n]))) #- 1j * beta_2 * dz/(2*dt**2) * (mu[k-1, :, n] + mu[k+1, :, n]))
 
         nu[k, :, n+1] = ((1 + 2j*kappa*dz*(abs(A[k, n])**2) + 1j*beta_2*dz/(dt**2)) * nu[k, :, n]
                             + 1j*kappa*dz*(A[k, n])**2 * np.conjugate(nu[k, :, n])
-                            + 1j * dz * inv_DFT((beta(2*pi*k/(M*dt) + omega_0) - beta_0) * DFT(nu[k, :, n]))) #- 1j * beta_2 * dz/(2*dt**2) * (nu[k-1, :, n] + nu[k+1, :, n]))
+                            + 1j * dz * ifft((beta(2*pi*k/(M*dt) + omega_0) - beta_0) * fft(nu[k, :, n]))) #- 1j * beta_2 * dz/(2*dt**2) * (nu[k-1, :, n] + nu[k+1, :, n]))
             
 
-C = np.zeros(M)
+C = np.zeros(M, dtype = 'complex_')
 C[:] = 2**0.5 * A[:, -1]
-
-
+"""
+"""
 #Calculate maximum squeezing ratio
 num = 0
 denom = 0
 for k in range(0, M):
+    if k%10 == 0:
+            print(k, " / ", M)
     for l in range(0, M):
         for m in range(0, M):
             num += np.real(C[m] * np.conj(C[k]) * (np.conj(mu[m, l, -1]) * mu[k, l, -1] + np.conj(nu[m, l, -1]) * nu[k, l, -1])
@@ -102,3 +115,33 @@ print(denom)
 
 R_max = num/denom
 print(R_max)
+"""
+"""
+fig, ax = plt.subplots(nrows=1, ncols=2, sharex=False, sharey=False)
+
+ax[0].title.set_text('t = 0')
+ax[1].title.set_text('t = end')
+
+ax[0].plot(np.linspace(0, z_max, N), A[0, :])
+ax[1].plot(np.linspace(0, z_max, N), A[1, :])
+plt.show()
+"""
+
+fig = plt.figure()
+ax = plt.axes(xlim=(0, z_max), ylim=(-A.max(), A.max()))
+line, = ax.plot([], [], lw=3)
+ax.set_xlabel('Distance [km]')
+ax.set_ylabel('Classical Pulse Envelope [W^0.5 * km^-1]')
+
+
+def init():
+    line.set_data([], [])
+    return line,
+def animate(i):
+    x = np.linspace(0, z_max, N)
+    y = A[i, :]
+    line.set_data(x, y)
+    return line,
+
+anim = FuncAnimation(fig, animate, init_func=init, frames=M, interval=100, blit=True)
+plt.show()
